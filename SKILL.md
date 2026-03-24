@@ -11,7 +11,7 @@ When triggered, read the user's message to determine what they need:
 
 - No args, `/morning-brief`, or "give me my brief" -> Run the full morning brief
 - `test` or "dry run" -> Run the brief but do NOT send the email
-- `schedule` -> Set up the daily 7am scheduled task
+- `schedule` -> Set up the daily scheduled task
 - `research [topic]` -> Web research document on a topic
 - `remember [text]` -> Store a memory
 - `profile` -> Show current profile and flag stale fields
@@ -36,7 +36,8 @@ Before doing anything, check if `~/.claude/morning-brief/profile.json` exists.
    - "Any VIP contacts whose emails should always surface to the top? (Names, email addresses, or company domains)"
    - "Do you work from an office, home, or both? If office, what's the building name or address?"
    - "Any personal context you'd like me to keep in mind for scheduling and suggestions? (e.g. partner's name, kids' school events, standing commitments)"
-3. Write the answers to `~/.claude/morning-brief/profile.json` using the profile schema (see PROFILE SCHEMA section).
+   - "Do you track job applications in a Google Sheet? If so, paste the URL here and I'll sync your follow-up reminders automatically. (You can skip this and add it later.)"
+3. Write the answers to `~/.claude/morning-brief/profile.json` using the profile schema (see PROFILE SCHEMA section). If a tracker URL was provided, parse the sheet ID and gid from the URL and store them in `job_search`.
 4. Tell the user: "Profile saved. Let me run a test brief so you can see what to expect -- I won't send the email yet."
 5. Proceed with the brief in test mode (no email send).
 
@@ -72,7 +73,10 @@ Note today's date, day of week, and the user's work hours from the profile.
 1. **Gmail**: Fetch emails received in the last 18 hours
 2. **Google Calendar**: Fetch all events for today + the next 7 days
 3. **Web search**: For each meeting today with external or unfamiliar attendees, search "[Name] [Company] LinkedIn" to get background
-4. **Job Tracker**: Fetch the tracker sheet via `https://docs.google.com/spreadsheets/d/1ImmRhkZyiX1omxKg-zXL6SEIom2rH-TLsR6ourGUIOQ/gviz/tq?tqx=out:html&gid=1724541655` using the browser (Claude in Chrome). If the data looks incomplete or fewer rows than expected (e.g. missing known companies), navigate to the editor URL `https://docs.google.com/spreadsheets/d/1ImmRhkZyiX1omxKg-zXL6SEIom2rH-TLsR6ourGUIOQ/edit?gid=1724541655`, open the Data menu, click "Remove filter", then re-fetch the gviz URL.
+4. **Job Tracker** (only if `profile.job_search.tracker_url` is set): Fetch the tracker sheet via the gviz/tq HTML endpoint derived from the profile URL using the browser (Claude in Chrome):
+   - Construct the fetch URL as: `https://docs.google.com/spreadsheets/d/[tracker_sheet_id]/gviz/tq?tqx=out:html&gid=[tracker_gid]`
+   - If the data looks incomplete (e.g. fewer rows than expected), navigate to the editor URL `https://docs.google.com/spreadsheets/d/[tracker_sheet_id]/edit?gid=[tracker_gid]`, open the Data menu, click "Remove filter", then re-fetch the gviz URL.
+   - If `profile.job_search.tracker_url` is not set, skip this step silently.
 
 Also check each calendar event today for:
 - Google Drive file links in the event description or attachments
@@ -150,7 +154,7 @@ If stale, append at the very end of the brief:
 
 ### 4h. Job Tracker Sync
 
-Using the tracker data fetched in Step 3, perform two checks. This runs silently in the background - only surface results that require action or that created/deleted events.
+**Only run this section if `profile.job_search.tracker_url` is set.** Using the tracker data fetched in Step 3, perform two checks. This runs silently in the background — only surface results that require action or that created/deleted events.
 
 **1. Rejection Cleanup**
 
@@ -159,18 +163,20 @@ Scan every row's Status column for any of these keywords (case-insensitive): "re
 For each match:
 - Search GCal for all events whose title contains both "Follow-Up" and the company name
 - Delete every matching event via gcal_delete_event
-- Note in the brief: "Removed follow-up events for [Company] - marked as [status] in tracker"
+- Note in the brief: "🗑️ Removed follow-up events for [Company] — marked as [status] in tracker"
 
 **2. Follow-Up Event Sync**
 
 For each row where Status = "Applied":
 - Extract: Company name, Role title, Applied date
-- Search GCal for existing events matching "Follow-Up 1 - [Company]" and "Follow-Up 2 - [Company]" (use gcal_list_events with a q= search)
-- If **Follow-Up 1** is missing AND (applied_date + 7 days) is today or in the future: create an all-day event titled "Follow-Up 1 - [Company] ([Role])" on that date, colorId "7", with the standard description block (company, role, applied date, job link, draft follow-up email)
-- If **Follow-Up 2** is missing AND (applied_date + 14 days) is today or in the future: create an all-day event titled "Follow-Up 2 - [Company] ([Role])" on that date, colorId "7", with the standard description block (second follow-up draft email, slightly different tone - more concise, references the first follow-up)
+- Search GCal for existing events matching "Follow-Up 1 — [Company]" and "Follow-Up 2 — [Company]" (use gcal_list_events with a q= search)
+- If **Follow-Up 1** is missing AND (applied_date + 7 days) is today or in the future: create an all-day event titled "Follow-Up 1 — [Company] ([Role])" on that date, colorId "7", with the standard description block (company, role, applied date, job link, draft follow-up email)
+- If **Follow-Up 2** is missing AND (applied_date + 14 days) is today or in the future: create an all-day event titled "Follow-Up 2 — [Company] ([Role])" on that date, colorId "7", with the standard description block (second follow-up draft email, slightly different tone — more concise, references the first follow-up)
 - Skip silently if both follow-up dates are already in the past
 
-If any events were created or deleted, add a one-line summary to section 4d (Proactive Suggestions).
+If any events were created or deleted, add a one-line summary to section 4d (Proactive Suggestions), e.g.:
+- "📅 Created follow-up events for Acme Corp and Example Inc (applied 7+ days ago, none on calendar)"
+- "🗑️ Removed 2 follow-up events — Example Co marked Rejected in tracker"
 
 If nothing changed, add nothing to the brief.
 
@@ -211,6 +217,8 @@ Write structured brief data to `~/.claude/morning-brief/briefs/[YYYY-MM-DD].json
 
 Append to `~/.claude/morning-brief/action_log.jsonl`:
 {"timestamp": "...", "action": "morning_brief_generated", "email_sent": true/false}
+
+---
 
 ---
 
@@ -265,7 +273,30 @@ Triggered by "research X", "look into X", "give me a doc on X".
 
 1. Run 3-5 web searches covering different angles of the topic
 2. Synthesize findings
-3. Render a document in Claude Preview
+3. Render a document in Claude Preview:
+
+```
+# [Topic] -- Research Brief
+[Date]
+
+## Executive Summary
+[2-3 sentence overview]
+
+## Key Findings
+
+### [Finding 1]
+[Content with inline source citations]
+
+### [Finding 2]
+...
+
+## Implications / What This Means
+[Practical takeaways relevant to the user's context and goals]
+
+## Sources
+- [Title] -- [URL]
+```
+
 4. Offer: "Want me to save this as a Google Doc?"
 5. If yes: create via Google Drive MCP, return the link
 
@@ -276,8 +307,10 @@ Triggered by "research X", "look into X", "give me a doc on X".
 Triggered by `/morning-brief schedule`.
 
 1. Read `brief_send_time` from profile (default: 07:00)
-2. Call `mcp__scheduled-tasks__create_scheduled_task` to register a daily task
-3. Confirm: "Done -- your Morning Brief is scheduled for [time] every day."
+2. Call `mcp__scheduled-tasks__create_scheduled_task` to register a daily task:
+   - Task: invoke `/morning-brief`
+   - Schedule: daily at the configured time, in the user's timezone
+3. Confirm: "Done -- your Morning Brief is scheduled for [time] every day. Task ID: [ID]."
 
 ---
 
@@ -303,11 +336,18 @@ Triggered by `/morning-brief schedule`.
   "fitness": null,
   "preferences": {},
   "goals_updated": "ISO date",
-  "key_people_updated": "ISO date"
+  "key_people_updated": "ISO date",
+  "job_search": {
+    "tracker_url": "string (full Google Sheets URL, optional)",
+    "tracker_sheet_id": "string (parsed from URL)",
+    "tracker_gid": "string (parsed from URL, the gid= parameter)"
+  }
 }
 ```
 
-**Fitness field**: Stays null until the user mentions fitness. If they do, ask "Do you track your workouts anywhere?" and update the field with what you learn.
+**Fitness field**: Stays null until the user mentions fitness. If they do, ask "Do you track your workouts anywhere?" and update the field with what you learn. No app integrations in V1 -- just context.
+
+**Job search field**: Optional. Populated during onboarding if the user provides a tracker URL, or later via `remember`. If null or missing, all job tracker sync steps are silently skipped.
 
 ---
 
@@ -321,4 +361,3 @@ Triggered by `/morning-brief schedule`.
 6. Graceful degradation: If any data source fails, skip that section with a brief note. Never abort the entire brief.
 7. Token efficiency: Limit email body reading to 300 characters per email. Show max 5 emails in priority tier.
 8. Never ask about fitness, WHOOP, or workout tracking unless the user has mentioned working out or wanting fitness time first.
-
